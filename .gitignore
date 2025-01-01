@@ -169,3 +169,12 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+
+# log files
+logs
+
+# Models except best model
+models/*
+!models/best_model/
+
