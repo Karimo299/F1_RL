@@ -4,11 +4,13 @@ from gymnasium import spaces
 import time
 from F1Env.track_data_thread import Listener, KEYS
 from F1Env.movement import Simulate_Input
-
+from F1Env.render import render
 
 class F1Env(gym.Env):
-  def __init__(self):
+  def __init__(self, render_mode='none'):
     super().__init__()
+    self.render_mode = render_mode
+    
     self.movement = Simulate_Input()
     self.listener = Listener()
     self.low_speed_steps = 0
@@ -62,6 +64,8 @@ class F1Env(gym.Env):
     # DO NOT REMOVE
 
     curr_state = self.listener.get_info()
+    self.render()
+
     if curr_state is None:
       raise ValueError("Listener returned None. Check external system integration.")
     return curr_state, {"position": curr_state[KEYS.lap_distance] * 5000}
@@ -91,6 +95,7 @@ class F1Env(gym.Env):
     self.prev_throttle = throttle_action
     self.prev_state = next_state
 
+    self.render()
     return next_state, reward, done, False, {"position": next_state[KEYS.lap_distance] * 5000}
 
   def calculate_reward(self, state):
@@ -157,3 +162,7 @@ class F1Env(gym.Env):
   def lap_completed(self, state):
     lap_completed = self.prev_state[KEYS.current_lap_time_in_ms] > state[KEYS.current_lap_time_in_ms]
     return lap_completed
+
+  def render(self):
+    if self.render_mode == 'human':  
+      render(self.listener)
