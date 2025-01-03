@@ -1,0 +1,7 @@
+matplotlib
+numpy
+pandas
+scipy
+shapely
+stable-baselines3
+pyvjoy

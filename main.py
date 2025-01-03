@@ -6,7 +6,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from F1Env import F1Env
 
 # Configurations
-model_name = "SAC_continued"
+model_name = "SAC_w_lines"
 total_timesteps = 1_000_000
 models_path = f"models/{model_name}_{total_timesteps}"
 log_path = f"logs/{model_name}_{total_timesteps}"
@@ -23,6 +23,7 @@ def train_model(model_path=None):
   if model_path:
     model = SAC.load(model_path, env=env, tensorboard_log=log_path)
   else:
+    print("Training new model...")
     model = SAC(
         policy="MlpPolicy",
         env=env,
@@ -44,7 +45,7 @@ def train_model(model_path=None):
         sde_sample_freq=-1,
         tensorboard_log=log_path,
         policy_kwargs=policy_kwargs,
-        verbose=1,
+        verbose=2,
         device="auto",
     )
 
@@ -55,6 +56,11 @@ def train_model(model_path=None):
   # Save the final model
   model.save(os.path.join(models_path, f"{model_name}_{total_timesteps}"))
 
+  # Check for NaN values in the model parameters
+  for name, param in model.policy.named_parameters():
+    if torch.isnan(param).any():
+      raise ValueError(f"NaN detected in model parameters: {name}")
+
 
 def use_model(model_path):
   model = SAC.load(model_path, env=env, tensorboard_log=log_path)
@@ -64,6 +70,9 @@ def use_model(model_path):
     while True:
       action, _states = model.predict(obs, deterministic=True)
       obs, rewards, dones, _, info = env.step(action)
+
+      if np.any(np.isnan(obs)):
+        raise ValueError("NaN detected in observations during model usage.")
 
       if dones:
         obs, _ = env.reset()
@@ -77,15 +86,15 @@ if __name__ == "__main__":
 
   mode = sys.argv[1].lower()
 
-if mode == "train":
-  model_path = sys.argv[2] if len(sys.argv) > 2 else None
-  train_model(model_path)
-elif mode == "use":
-  if len(sys.argv) < 3:
-    print("Usage: python script.py use <model_path>")
+  if mode == "train":
+    model_path = sys.argv[2] if len(sys.argv) > 2 else None
+    train_model(model_path)
+  elif mode == "use":
+    if len(sys.argv) < 3:
+      print("Usage: python script.py use <model_path>")
+      sys.exit(1)
+    model_path = sys.argv[2]
+    use_model(model_path)
+  else:
+    print("Invalid mode. Use 'train' or 'use'.")
     sys.exit(1)
-  model_path = sys.argv[2]
-  use_model(model_path)
-else:
-  print("Invalid mode. Use 'train' or 'use'.")
-  sys.exit(1)

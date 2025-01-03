@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 import threading
 
-from data_types import PacketHeader, PacketLapData, PacketMotionData, PacketCarTelemetryData
+from F1Env.data_types import PacketHeader, PacketLapData, PacketMotionData, PacketCarTelemetryData
+from shapely.geometry import Point, Polygon
 
 
 @dataclass
@@ -17,9 +18,11 @@ class TelemetryData:
   speed: float = 0
   steer: float = 0.0
   throttle: float = 0.0
-  distance_to_left: float = 0.0
-  distance_to_right: float = 0.0
   distance_to_line: float = 0.0
+  world_x: float = 0.0
+  world_y: float = 0.0
+  world_z: float = 0.0
+  heading: float = 0.0
 
 
 @dataclass
@@ -30,9 +33,12 @@ class KEYS:
   speed = 3
   steer = 4
   throttle = 5
-  distance_to_left = 6
-  distance_to_right = 7
-  distance_to_line = 8
+  distance_to_line = 6
+  straight_distance = 7
+  left_45_distance = 8
+  right_45_distance = 9
+  left_90_distance = 10
+  right_90_distance = 11
 
 
 PACKET_LAP_DATA = (2024, 1, 2)
@@ -49,19 +55,18 @@ class Listener:
 
     self.data_event = threading.Event()
 
-    self.left_track = pd.read_csv("csv/left_track.csv")
-    self.right_track = pd.read_csv("csv/right_track.csv")
-    self.racing_line = pd.read_csv("csv/racing_line.csv")
+    self.track_data = pd.read_csv("./csv/austria.csv")
+    self.racing_line = pd.read_csv("./csv/racing_line.csv")
 
     self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     self.sock.bind((self.UDP_IP, self.UDP_PORT))
 
     print(f"Listening for telemetry data on {self.UDP_IP}:{self.UDP_PORT}...")
-    self.thread = Thread(target=self.track_data)
+    self.thread = Thread(target=self.process_track_data)
     self.thread.daemon = True
     self.thread.start()
 
-  def track_data(self):
+  def process_track_data(self):
     packets_recieved = [False, False, False]
     while True:
       try:
@@ -92,6 +97,12 @@ class Listener:
             self.telemetry_data.world_y = motion_data.world_position_y
             self.telemetry_data.world_z = motion_data.world_position_z
 
+            forward_x = motion_data.world_forward_dir_x / 32767.0
+            forward_z = motion_data.world_forward_dir_z / 32767.0
+
+            heading = np.arctan2(forward_z, forward_x)
+            self.telemetry_data.heading = heading
+
           elif key == PACKET_CAR_TELEMETRY:
             packets_recieved[2] = True
             packet_car_telemetry_data = PacketCarTelemetryData.from_buffer_copy(data)
@@ -117,15 +128,10 @@ class Listener:
   def get_info(self):
     self.data_event.wait()
 
-    # Compute the minimum distance from the point to the left track boundary
-    left_distances = np.sqrt((self.left_track['x'] - self.telemetry_data.world_x) ** 2 + (self.left_track['z'] - self.telemetry_data.world_z) ** 2)
-    distance_to_left = left_distances.min() / 15
-
-    # Compute the minimum distance from the point to the right track boundary
-    right_distances = np.sqrt((self.right_track['x'] - self.telemetry_data.world_x) ** 2 + (self.right_track['z'] - self.telemetry_data.world_z) ** 2)
-    distance_to_right = right_distances.min() / 15
-
     distance_to_line = self.calculate_distance_to_line() / 15
+    _, _, vectors = self.get_car_position()
+
+    distances = np.array([calculate_vector_distance(vector) for vector in vectors], dtype=np.float32) / 735
     with self.lock:
       temp = [
           self.telemetry_data.current_lap_time_in_ms,
@@ -134,9 +140,12 @@ class Listener:
           self.telemetry_data.speed,
           self.telemetry_data.steer,
           self.telemetry_data.throttle,
-          distance_to_left,
-          distance_to_right,
-          distance_to_line
+          distance_to_line,
+          distances[0],
+          distances[1],
+          distances[2],
+          distances[3],
+          distances[4]
       ]
 
     try:
@@ -144,6 +153,41 @@ class Listener:
     except ValueError as e:
       print(f"Error converting telemetry data to array: {e}")
       return np.zeros(len(temp), dtype=np.float32)  # Fallback
+
+  def get_car_position(self):
+    angles = [0, -45, 45, -90, 90]
+    vectors = []
+
+    with self.lock:
+      car_x = self.telemetry_data.world_x
+      car_z = self.telemetry_data.world_z
+      car_heading = self.telemetry_data.heading
+
+    for angle in angles:
+      rad_angle = np.radians(angle)
+      direction_x = np.cos(car_heading + rad_angle)
+      direction_z = np.sin(car_heading + rad_angle)
+
+      intersection_left = find_intersection(car_x, car_z, car_x + direction_x * 1000, car_z + direction_z * 1000, self.track_data['x_left'], self.track_data['z_left'])
+      intersection_right = find_intersection(car_x, car_z, car_x + direction_x * 1000, car_z + direction_z * 1000, self.track_data['x_right'], self.track_data['z_right'])
+
+      if intersection_left and intersection_right:
+        dist_left = np.sqrt((intersection_left[0] - car_x) ** 2 + (intersection_left[1] - car_z) ** 2)
+        dist_right = np.sqrt((intersection_right[0] - car_x) ** 2 + (intersection_right[1] - car_z) ** 2)
+        if dist_left < dist_right:
+          vector = (intersection_left[0] - car_x, intersection_left[1] - car_z)
+        else:
+          vector = (intersection_right[0] - car_x, intersection_right[1] - car_z)
+      elif intersection_left:
+        vector = (intersection_left[0] - car_x, intersection_left[1] - car_z)
+      elif intersection_right:
+        vector = (intersection_right[0] - car_x, intersection_right[1] - car_z)
+      else:
+        vector = (0, 27.11)  # No intersection found
+
+      vectors.append(vector)
+
+    return car_x, car_z, vectors
 
   def calculate_distance_to_line(self):
     # Compute the minimum distance from the point to the racing line
@@ -161,8 +205,7 @@ class Listener:
       previous_point = self.racing_line.iloc[closest_point_index - 1]
 
     # Compute direction of the racing line
-    racing_line_direction = np.array([closest_point['x'] - previous_point['x'],
-                                      closest_point['z'] - previous_point['z']])
+    racing_line_direction = np.array([closest_point['x'] - previous_point['x'], closest_point['z'] - previous_point['z']])
 
     # Vector from the racing line to the car
     vector_to_car = np.array([self.telemetry_data.world_x - closest_point['x'], self.telemetry_data.world_z - closest_point['z']])
@@ -175,3 +218,55 @@ class Listener:
       distance_to_line = -distance_to_line
 
     return distance_to_line
+
+  def is_car_off_track(self):
+    """
+    Check if the car is off-track using Shapely.
+    """
+    car_position = Point(self.telemetry_data.world_x, self.telemetry_data.world_z)
+
+    left_border = list(zip(self.track_data['x_left'], self.track_data['z_left']))
+    right_border = list(zip(self.track_data['x_right'], self.track_data['z_right']))
+    track_polygon = Polygon(left_border + right_border[::-1])
+
+    return not track_polygon.contains(car_position)
+
+
+def calculate_vector_distance(vector):
+  return f"{float(np.sqrt(vector[0] ** 2 + vector[1] ** 2)):.2f}"
+
+
+def find_intersection(x1, z1, x2, z2, border_x, border_z):
+  """
+  Find the intersection of a line segment with a polyline.
+  """
+  heading_line_dx = x2 - x1
+  heading_line_dz = z2 - z1
+
+  closest_dist = 10000
+  intersection_point = None
+
+  for i in range(len(border_x) - 1):
+    x3, z3 = border_x[i], border_z[i]
+    x4, z4 = border_x[i + 1], border_z[i + 1]
+
+    border_dx = x4 - x3
+    border_dz = z4 - z3
+
+    denominator = (heading_line_dx * border_dz - heading_line_dz * border_dx)
+    
+    if abs(denominator) < 1e-6:
+      continue
+
+    t = ((x3 - x1) * border_dz - (z3 - z1) * border_dx) / denominator
+    u = ((x3 - x1) * heading_line_dz - (z3 - z1) * heading_line_dx) / denominator
+
+    if 0 <= t <= 1 and 0 <= u <= 1:
+      intersect_x = x1 + t * heading_line_dx
+      intersect_z = z1 + t * heading_line_dz
+      dist = np.sqrt((intersect_x - x1) ** 2 + (intersect_z - z1) ** 2)
+      if dist < closest_dist:
+        closest_dist = dist
+        intersection_point = (intersect_x, intersect_z)
+
+  return intersection_point
